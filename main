@@ -1,0 +1,211 @@
+import numpy as np
+import time
+import math
+
+from centroid_module_gpt import get_color_centroids_once
+from InverseMaster import theta_calculator, a2, a3, a4, d1, d5, d6
+from moving_robot_org import rad2pulse
+from motorLLC_Protocol_TP_GPT import motorLLC
+
+# Z 값 미제공 시 기본 픽업 높이
+DEFAULT_Z_PICK = 170  
+
+# 블록 표면까지 내려갈 거리 (110mm 위 → 실제 블록 위치): 110 - 15 = 95
+SURFACE_OFFSET = 110 - 30  
+
+# 색상별 블록을 놓을 위치 (위치 단위: mm)
+# 사용자가 실제 값을 채워 넣어야 함. 
+# 예시: 'RED': (x_red_above, y_red_above, z_red_above)
+PLACE_POSITIONS = {
+    "RED":   ( 200.0,  100.0, 150.0),  # x, y, z_above
+    "GREEN": ( 200.0, -100.0, 150.0),
+    "BLUE":  (-200.0,   0.0, 150.0),
+}
+
+
+def make_target_matrix(x_mm: float, y_mm: float, z_mm: float) -> np.ndarray:
+    """
+    엔드 이펙터 목표 위치 T07 행렬 생성
+    (고정된 회전 행렬 + 위치 (x_mm, y_mm, z_mm))
+    """
+    rot = np.array([
+        [ 0,  0,  1],
+        [-1,  0,  0],
+        [ 0, -1,  0]
+    ])
+    T = np.zeros((4, 4))
+    T[:3, :3] = rot
+    T[0, 3], T[1, 3], T[2, 3], T[3, 3] = x_mm, y_mm, z_mm, 1
+    return T
+
+
+def deg2rad_list(deg_list: list[float]) -> list[float]:
+    """도(degree) 리스트 → 라디안(radian) 리스트"""
+    return [math.radians(d) for d in deg_list]
+
+
+def move_joint_positions(motor, joint_angles_rad: list[float], velocity_list: list[int]):
+    """
+    각 관절(6개) + 그리퍼(1개) 각도(radian) 리스트 → 펄스로 변환 → 모터 이동
+    Args:
+        motor: motorLLC 객체
+        joint_angles_rad: [θ1, θ2, θ3, θ4, θ5, θ6, θ_gripper] (rad)
+        velocity_list: [v1, v2, ..., v7] (pulse/s)
+    """
+    pulses = [rad2pulse(theta) for theta in joint_angles_rad]
+    motor.moveTo(pulses, velocity_list)
+
+
+def main():
+    # ───────────────────────────────────────────────────────────────────────────
+    # 1) 로봇 초기 위치 [0,0,0,0,0,0, gripper_open(30°)]로 이동
+    # ───────────────────────────────────────────────────────────────────────────
+    motor = motorLLC()
+    motor.open()
+    motor.torque_enable()
+
+    # 초기 관절 6개 = 0°, 그리퍼 = 30°
+    init_deg = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 30.0]
+    init_rad = deg2rad_list(init_deg)
+    vel_init = [100] * 7
+    move_joint_positions(motor, init_rad, vel_init)
+    time.sleep(2.0)  # 초기 위치로 이동 대기
+
+    # ───────────────────────────────────────────────────────────────────────────
+    # 2) RGB 블록 센트로이드(mm) 획득 (x, y 값만)
+    # ───────────────────────────────────────────────────────────────────────────
+    r_info, g_info, b_info = get_color_centroids_once(camera_index=1, timeout_sec=5.0, debug=False)
+    if not (r_info and g_info and b_info):
+        print("ERROR: 모든 색상 블록을 검출하지 못했습니다.")
+        motor.close()
+        return
+
+    # 센트로이드 정보 unpack: (cX, cY, X_mm, Y_mm [, Z_mm])
+    def extract_xy(info_tuple):
+        return info_tuple[2], info_tuple[3]
+
+    centroids_mm = {
+        "RED":   extract_xy(r_info),
+        "GREEN": extract_xy(g_info),
+        "BLUE":  extract_xy(b_info),
+    }
+
+    # ───────────────────────────────────────────────────────────────────────────
+    # 3) 색상 순서대로 순회하며 픽업 → 지정 위치에 배치
+    # ───────────────────────────────────────────────────────────────────────────
+    for color in ["RED", "GREEN", "BLUE"]:
+        # 3-1) 센트로이드 x, y(mm)
+        cx_mm, cy_mm = centroids_mm[color]
+
+        # ───────────────────────────────────────────────────────────────────────
+        # 3-2) 높이 110mm 위치(c_x, c_y, 110)로 이동 (위치 상공)
+        # ───────────────────────────────────────────────────────────────────────
+        T_above_block = make_target_matrix(cx_mm, cy_mm, 110.0)
+        try:
+            # IK 계산 반환값: (θ1~θ6) [rad]
+            ik_above = theta_calculator(T_above_block, a2, a3, a4, d1, d5, d6)
+        except Exception as e:
+            print(f"ERROR: {color} 위 상공 IK 실패:", e)
+            motor.close()
+            return
+
+        # 관절 6개는 ik_above, 그리퍼 = 30°(열려있음)
+        gripper_open_rad = math.radians(30.0)
+        joint_above_rad = list(ik_above) + [gripper_open_rad]
+        vel_above = [100] * 7
+        move_joint_positions(motor, joint_above_rad, vel_above)
+        time.sleep(2.0)
+
+        # ───────────────────────────────────────────────────────────────────────
+        # 3-3) 블록 표면 위치로 이동 (높이 = 110 - 95 = 15mm)
+        # ───────────────────────────────────────────────────────────────────────
+        z_surface = 110.0 - SURFACE_OFFSET  # 15mm
+        T_on_block = make_target_matrix(cx_mm, cy_mm, z_surface)
+        try:
+            ik_on = theta_calculator(T_on_block, a2, a3, a4, d1, d5, d6)
+        except Exception as e:
+            print(f"ERROR: {color} 블록 표면 IK 실패:", e)
+            motor.close()
+            return
+
+        joint_on_rad = list(ik_on) + [gripper_open_rad]
+        move_joint_positions(motor, joint_on_rad, vel_above)
+        time.sleep(2.0)
+
+        # ───────────────────────────────────────────────────────────────────────
+        # 3-4) 그리퍼를 30° → -11°로 변경 (블록 집기)
+        # ───────────────────────────────────────────────────────────────────────
+        gripper_closed_rad = math.radians(-11.0)
+        joint_grip_rad = list(ik_on) + [gripper_closed_rad]
+        move_joint_positions(motor, joint_grip_rad, vel_above)
+        time.sleep(1.0)
+
+        # ───────────────────────────────────────────────────────────────────────
+        # 3-5) 블록을 쥔 상태로 다시 상공(110mm)으로 들어올림 (gripper 닫힌 채)
+        # ───────────────────────────────────────────────────────────────────────
+        joint_lift_rad = list(ik_above) + [gripper_closed_rad]
+        move_joint_positions(motor, joint_lift_rad, vel_above)
+        time.sleep(2.0)
+
+        # ───────────────────────────────────────────────────────────────────────
+        # 3-6) 블록 놓을 위치로 이동
+        #       (각 색상별로 PLACE_POSITIONS에 정의된 x,y,z_above 사용)
+        # ───────────────────────────────────────────────────────────────────────
+        place_x, place_y, place_z_above = PLACE_POSITIONS[color]
+        T_place_above = make_target_matrix(place_x, place_y, place_z_above)
+        try:
+            ik_place_above = theta_calculator(T_place_above, a2, a3, a4, d1, d5, d6)
+        except Exception as e:
+            print(f"ERROR: {color} 배치 상공 IK 실패:", e)
+            motor.close()
+            return
+
+        joint_place_above_rad = list(ik_place_above) + [gripper_closed_rad]
+        move_joint_positions(motor, joint_place_above_rad, vel_above)
+        time.sleep(2.0)
+
+        # ───────────────────────────────────────────────────────────────────────
+        # 3-7) 블록 놓기 (높이 = place_z_above - 95mm)
+        # ───────────────────────────────────────────────────────────────────────
+        place_z_surface = place_z_above - SURFACE_OFFSET
+        T_place_on = make_target_matrix(place_x, place_y, place_z_surface)
+        try:
+            ik_place_on = theta_calculator(T_place_on, a2, a3, a4, d1, d5, d6)
+        except Exception as e:
+            print(f"ERROR: {color} 배치 표면 IK 실패:", e)
+            motor.close()
+            return
+
+        joint_place_on_rad = list(ik_place_on) + [gripper_closed_rad]
+        move_joint_positions(motor, joint_place_on_rad, vel_above)
+        time.sleep(2.0)
+
+        # ───────────────────────────────────────────────────────────────────────
+        # 3-8) 그리퍼를 -11° → 30°로 변경 (블록 놓기)
+        # ───────────────────────────────────────────────────────────────────────
+        joint_release_rad = list(ik_place_on) + [gripper_open_rad]
+        move_joint_positions(motor, joint_release_rad, vel_above)
+        time.sleep(1.0)
+
+        # ───────────────────────────────────────────────────────────────────────
+        # 3-9) 그리퍼 열고 있는 상태에서 다시 상공으로 올라옴 (place_z_above)
+        # ───────────────────────────────────────────────────────────────────────
+        joint_place_lift_rad = list(ik_place_above) + [gripper_open_rad]
+        move_joint_positions(motor, joint_place_lift_rad, vel_above)
+        time.sleep(2.0)
+
+        print(f"{color} 블록 픽업 및 배치 완료")
+
+    # ───────────────────────────────────────────────────────────────────────────
+    # 4) 마지막으로 초기 위치 또는 안전 위치로 이동
+    # ───────────────────────────────────────────────────────────────────────────
+    home_deg = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 30.0]  # 원하는 최종 위치로 수정 가능
+    home_rad = deg2rad_list(home_deg)
+    move_joint_positions(motor, home_rad, vel_init)
+    time.sleep(2.0)
+
+    motor.close()
+    print("모든 순서 종료")
+
+if __name__ == "__main__":
+    main()

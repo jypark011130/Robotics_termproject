@@ -71,7 +71,7 @@ def theta_calculator(T07, a2, a3, a4, d1, d5, d6):
     # 5) s5 = s1 * r13 - c1 * r23 (사진의 K)
     s5 = s1*r13-c1*r23
     c5 = math.sqrt(1-s5*s5)
-    print("c5=",c5)
+    #print("c5=",c5)
     # 6) c5 = sqrt(1 - s5^2)
     th5_1 = math.atan2(s5,c5)
     th5_2 = math.atan2(s5, -c5)
@@ -147,7 +147,7 @@ def theta_calculator(T07, a2, a3, a4, d1, d5, d6):
     else:
         # abs1 == abs2 인 경우엔 양수인 쪽 선택
         th3 = min(th3_1, th3_2)
-        print('th3 부호가 정확히 정해지지 않았어요! 일단 -로')
+        #print('th3 부호가 정확히 정해지지 않았어요! 일단 -로')
 
     #print("th3=", th3)
 
@@ -178,65 +178,3 @@ def theta_calculator(T07, a2, a3, a4, d1, d5, d6):
 
     return th1, th2, th3, th4, th5, th6
 
-
-if __name__ == "__main__":
-    # 테스트용 관절각 (deg)과 파라미터
-    #th_deg = [-40,40,-40,-40,-40,-130]
-    #a2, a3, a4 = 93.5, 94, 68
-    #d1, d5, d6 = 83, 61, 100
-
-    # 1) Forward Kinematics
-    #T07 = ForwardKinematics(th_deg, a2, a3, a4, d1, d5, d6)
-    #print(T07)
-    ###############################################################
-    # 1) Z축으로 –90° 회전 행렬 R_z(-90°)
-    Rz = np.array([
-        [0, 1, 0],
-        [-1, 0, 0],
-        [0, 0, 1]
-    ])
-
-    # 2) Y축으로 +90° 회전 행렬 R_y(+90°)
-    Ry = np.array([
-        [0, 0, 1],
-        [0, 1, 0],
-        [-1, 0, 0]
-    ])
-
-    # 3) 합성 회전 R = R_y(+90°) @ R_z(-90°)
-    R = Ry @ Rz
-    # R == [[ 0,  0,  1],
-    #       [-1,  0,  0],
-    #       [ 0, -1,  0]]
-
-
-    print("R=",R)
-    # 4) 최종 4×4 균질변환 행렬 T 생성
-    T07 = np.eye(4)
-    T07[:3, :3] = R
-    T07[:3, 3] = [300, 0, 40]
-    print(T07)
-    ###############################################################
-
-
-    # 2) Sympy 행렬을 숫자로 근사(evalf)만 해 줍니다
-    #T07_num = T07.evalf()
-
-    # 3) Inverse Kinematics
-    # T07을 T07_num으로 바꾸고 근사해도 되긴 함
-    th1, th2, th3, th4, th5, th6 = theta_calculator(
-        T07, a2, a3, a4, d1, d5, d6
-    )
-
-    # 4) rad → deg 변환
-    degs = [math.degrees(th) for th in (th1, th2, th3, th4, th5, th6)]
-    ths = (th1, th2, th3, th4, th5, th6)
-    # 5) 결과 출력
-    #print(f"px={T07[0, 3]}, py={T07[1, 3]}, pz={T07[2, 3]}")
-    print("입력에 대한 Forward:",f"px={T07[0, 3]:.2f}, py={T07[1, 3]:.2f}, pz={T07[2, 3]:.2f}")
-    #print("Recovered θ (rad):", th1, th2, th3, th4, th5, th6)
-    print("Inverse deg값:",
-          f"{degs[0]:.2f}, {degs[1]:.2f}, {degs[2]:.2f}, "
-          f"{degs[3]:.2f}, {degs[4]:.2f}, {degs[5]:.2f}")
-    T07 = ForwardKinematics(degs, a2, a3, a4, d1, d5, d6)
-    print("Inverse deg값을 Foward한 값:",f"px={T07[0, 3]:.2f}, py={T07[1, 3]:.2f}, pz={T07[2, 3]:.2f}")

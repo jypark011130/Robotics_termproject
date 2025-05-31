@@ -1,0 +1,64 @@
+import time
+import math
+from motorLLC_Protocol_TP_GPT import motorLLC  # Dynamixel LLC wrapper
+
+TB = 2
+TF = 8.0
+TL = TF - 2 * TB
+DT = 0.1
+PULSES_PER_RAD = 1023 / math.radians(300)
+
+# ---------------------------------------------------------------------------
+#                                Helpers
+# ---------------------------------------------------------------------------
+
+def rad2pulse(theta_rad: float) -> int:
+    mech_deg = math.degrees(theta_rad) + 150.0
+    mech_deg = max(0.0, min(300.0, mech_deg))
+    return int(round(mech_deg * 1023.0 / 300.0))
+
+def pulse2rad(pulse: int) -> float:
+    mech_deg = pulse * 300.0 / 1023.0
+    user_deg = mech_deg - 150.0
+    return math.radians(user_deg)
+
+def s_curve_velocities(theta_prev_deg, theta_next_deg):
+    v_list = []
+    for th0, thf in zip(theta_prev_deg, theta_next_deg):
+        delta_rad = abs(math.radians(thf - th0))
+        v_max_rad = delta_rad / (TB + TL)
+        v_max_pulse = max(1,
+                          min(1023,
+                              int(round(v_max_rad * PULSES_PER_RAD))))
+        v_list.append(v_max_pulse)
+    return v_list
+
+# ---------------------------------------------------------------------------
+#                                Main
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    # 1) 모터 객체 생성 & 포트 열기
+    motor = motorLLC()
+    motor.open()
+    motor.torque_enable()
+
+    # ── 현재 관절 각도 ────────────────────────────────────────────────
+    # 현재 펄스 읽기 → 라디안 → 도 단위로 변환 (theta_prev 자동 계산용)
+    present_pulse = motor.readPos()                   # list of 7 ints
+    theta_prev_rad = [pulse2rad(p) for p in present_pulse]
+    theta_prev_deg = [math.degrees(r) for r in theta_prev_rad]
+
+    # ── 목표 관절 각도 (수정하세요!) ────────────────────────────────────
+    # 예시: 홈 포지션 → 픽 포즈
+    theta_next_deg = [0, 1, 0, 0, 0, 0, -30]  # 7 joints
+
+    # ── 목표 위치(펄스) 및 속도 계산 ────────────────────────────────────
+    positions  = [rad2pulse(math.radians(d)) for d in theta_next_deg]
+    velocities = s_curve_velocities(theta_prev_deg, theta_next_deg)
+
+    # ── 동기 쓰기 명령 전송 ────────────────────────────────────────────
+    motor.moveTo(positions, velocities)
+
+
+
+    # motor.close()  # 주석 해제하면 토크 비활성화 후 포트 닫음

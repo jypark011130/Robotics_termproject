@@ -1,0 +1,212 @@
+import cv2
+import numpy as np
+import time
+from pixel_to_meter_GPT import pixel_to_real_position
+
+# ──────────────────────────────────────────────────────────────────
+# 최소·최대 면적 (픽셀 단위)
+MIN_AREA = 500
+MAX_AREA = 10000
+# 이미지 해상도 (프레임 크기)
+FRAME_WIDTH, FRAME_HEIGHT = 1280, 720
+
+# Morphology용 커널 (에지 연결)
+MORPH_KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+# ──────────────────────────────────────────────────────────────────
+
+def get_color_centroids_once(camera_index=1, timeout_sec=5.0, debug=False):
+    """
+    카메라를 열어 프레임을 연속으로 읽다가
+    RED, GREEN, BLUE 블록의 무게중심 픽셀 좌표와 실제(mm) 좌표를
+    모두 한 번씩 검출하면 반환하고 종료한다.
+
+    Args:
+        camera_index (int): cv2.VideoCapture에 사용할 카메라 인덱스. 기본값 1.
+        timeout_sec (float): 타임아웃(초). 지정된 시간 내에 모든 색을 검출하지 못하면 종료.
+        debug (bool): True면 디버깅용 윈도우를 띄워서 결과를 시각화함. 기본은 False.
+
+    Returns:
+        tuple:
+            r_centroid: (cX_r, cY_r, Xr_mm, Yr_mm) or None
+            g_centroid: (cX_g, cY_g, Xg_mm, Yg_mm) or None
+            b_centroid: (cX_b, cY_b, Xb_mm, Yb_mm) or None
+    """
+    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+    if not cap.isOpened():
+        cap.release()
+        raise RuntimeError(f"Cannot open camera (index={camera_index})")
+
+    r_centroid = None
+    g_centroid = None
+    b_centroid = None
+    start_time = time.time()
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                # 프레임을 못 읽으면 잠깐 대기 후 재시도
+                if time.time() - start_time > timeout_sec:
+                    break
+                continue
+
+            # (1) Blur → Grayscale → Canny Edge
+            blurred = cv2.GaussianBlur(frame, (7, 7), 0)
+            gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 40, 180)
+
+            # (2) Morphology Close 처리
+            edges_closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, MORPH_KERNEL, iterations=2)
+
+            # (3) Contour 검출
+            contours, _ = cv2.findContours(edges_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # (4) 각 컨투어를 순회하며 색상 판별 및 무게중심 계산
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area < MIN_AREA or area > MAX_AREA:
+                    continue
+
+                # 컨투어 내부 마스크 생성 → RGB 평균값 계산
+                mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+                cv2.drawContours(mask, [cnt], -1, 255, -1)
+                r_mean, g_mean, b_mean = cv2.mean(rgb_frame, mask=mask)[:3]
+
+                # 색상 분류: 이미 저장된 색상은 다시 건너뜀
+                if r_mean > g_mean and r_mean > b_mean and r_centroid is None:
+                    label = "RED"
+                elif g_mean > r_mean and g_mean > b_mean and g_centroid is None:
+                    label = "GREEN"
+                elif b_mean > r_mean and b_mean > g_mean and b_centroid is None:
+                    label = "BLUE"
+                else:
+                    continue
+
+                # 무게중심(Pixel) 계산
+                M = cv2.moments(cnt)
+                if M["m00"] == 0:
+                    continue
+                cX = int(M["m10"] / M["m00"])
+                cY = int(M["m01"] / M["m00"])
+
+                # 픽셀 → 실제(mm) 좌표 변환
+                X_mm, Y_mm = pixel_to_real_position(cX, cY)
+
+                # 해당 색상이 아직 None이면 저장
+                if label == "RED":
+                    r_centroid = (cX, cY, X_mm, Y_mm)
+                elif label == "GREEN":
+                    g_centroid = (cX, cY, X_mm, Y_mm)
+                else:
+                    b_centroid = (cX, cY, X_mm, Y_mm)
+
+                # Debug: 프레임에 컨투어와 중심점 그리기
+                if debug:
+                    if label == "RED":
+                        box_color = (0, 0, 255)
+                    elif label == "GREEN":
+                        box_color = (0, 255, 0)
+                    else:
+                        box_color = (255, 0, 0)
+
+                    cv2.drawContours(frame, [cnt], -1, box_color, 2)
+                    cv2.circle(frame, (cX, cY), 5, box_color, -1)
+                    text = f"{label} Pix({cX},{cY})"
+                    cv2.putText(frame, text, (cX + 10, cY - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
+
+            # (5) 모든 색상 검출 완료 시 즉시 반환
+            if r_centroid and g_centroid and b_centroid:
+                break
+
+            # (6) 타임아웃 체크
+            if time.time() - start_time > timeout_sec:
+                break
+
+            # (7) 디버깅 모드라면 화면 출력 및 ‘q’ 종료 대기
+            if debug:
+                cv2.imshow("Camera Feed + Classified", frame)
+                cv2.imshow("Edges", edges_closed)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+
+    finally:
+        cap.release()
+        if debug:
+            cv2.destroyAllWindows()
+
+    return r_centroid, g_centroid, b_centroid
+
+
+
+def get_centroid(color: str,
+                 camera_index: int = 1,
+                 timeout_sec: float = 5.0,
+                 debug: bool = False) -> tuple[float, float]:
+    """
+    color: "red", "green", "blue" 중 하나(소문자)
+    내부적으로 get_color_centroids_once()를 호출하여,
+    원하는 색상의 (X_mm, Y_mm) 좌표만 반환.
+
+    반환:
+        (X_mm, Y_mm)
+    예외:
+        해당 색상이 검출되지 않으면 RuntimeError 발생
+    """
+    # 한 번만 센서에서 RED/GREEN/BLUE를 모두 검출한 뒤
+    r_info, g_info, b_info = get_color_centroids_once(camera_index, timeout_sec, debug)
+
+    if color.lower() == "red":
+        if r_info is None:
+            raise RuntimeError("RED 블록을 찾지 못했습니다.")
+        _, _, Xr_mm, Yr_mm = r_info
+        return Xr_mm, Yr_mm
+
+    elif color.lower() == "green":
+        if g_info is None:
+            raise RuntimeError("GREEN 블록을 찾지 못했습니다.")
+        _, _, Xg_mm, Yg_mm = g_info
+        return Xg_mm, Yg_mm
+
+    elif color.lower() == "blue":
+        if b_info is None:
+            raise RuntimeError("BLUE 블록을 찾지 못했습니다.")
+        _, _, Xb_mm, Yb_mm = b_info
+        return Xb_mm, Yb_mm
+
+    else:
+        raise ValueError(f"지원하지 않는 색상 '{color}'입니다. 'red', 'green', 'blue'만 가능합니다.")
+
+
+
+# if __name__ == "__main__":
+#     # ──────────────────────────────────────────────────────────────────
+#     # 테스트 코드: 함수 호출 후 결과 출력
+#     try:
+#         # debug=True로 설정하면 영상창이 뜨며, 검출 상황을 실시간으로 확인할 수 있음
+#         r_info, g_info, b_info = get_color_centroids_once(camera_index=1, timeout_sec=5.0, debug=False)
+
+#         if r_info:
+#             cX_r, cY_r, Xr_mm, Yr_mm = r_info
+#             print(f"RED   Pix({cX_r},{cY_r})  Real(mm)=({Xr_mm:.1f},{Yr_mm:.1f})")
+#         else:
+#             print("RED 블록 검출 실패")
+
+#         if g_info:
+#             cX_g, cY_g, Xg_mm, Yg_mm = g_info
+#             print(f"GREEN Pix({cX_g},{cY_g})  Real(mm)=({Xg_mm:.1f},{Yg_mm:.1f})")
+#         else:
+#             print("GREEN 블록 검출 실패")
+
+#         if b_info:
+#             cX_b, cY_b, Xb_mm, Yb_mm = b_info
+#             print(f"BLUE  Pix({cX_b},{cY_b})  Real(mm)=({Xb_mm:.1f},{Yb_mm:.1f})")
+#         else:
+#             print("BLUE 블록 검출 실패")
+
+#     except RuntimeError as e:
+#         print("에러 발생:", e)
+#     # ──────────────────────────────────────────────────────────────────

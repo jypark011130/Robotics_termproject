@@ -71,7 +71,7 @@ def theta_calculator(T07, a2, a3, a4, d1, d5, d6):
     # 5) s5 = s1 * r13 - c1 * r23 (사진의 K)
     s5 = s1*r13-c1*r23
     c5 = math.sqrt(1-s5*s5)
-    #print("s5=",s5)
+    print("c5=",c5)
     # 6) c5 = sqrt(1 - s5^2)
     th5_1 = math.atan2(s5,c5)
     th5_2 = math.atan2(s5, -c5)
@@ -80,7 +80,7 @@ def theta_calculator(T07, a2, a3, a4, d1, d5, d6):
     c5 = math.cos(th5)
     s5 = math.sin(th5)
 
-    #print("c5=",c5)
+    print("c5=",c5)
     c234 = r33 / math.cos(th5)
     #print("c1*r13+s1*r23=",c1*r13+s1*r23)
     s234 = -(c1*r13+s1*r23)/math.cos(th5)
@@ -111,6 +111,7 @@ def theta_calculator(T07, a2, a3, a4, d1, d5, d6):
 
     # ── 3) 선택된 θ5 로부터 하위 각도들을 *다시* 계산 ──
     c5 = math.cos(th5)
+    print("c5=", c5)
     s5 = math.sin(th5)
     c234 = r33 / math.cos(th5)
     s234 = -(c1 * r13 + s1 * r23) / math.cos(th5)
@@ -180,30 +181,40 @@ def theta_calculator(T07, a2, a3, a4, d1, d5, d6):
 
 if __name__ == "__main__":
     # 테스트용 관절각 (deg)과 파라미터
-    th_deg = [-40,40,-40,-40,-40,-130]
-    a2, a3, a4 = 93.5, 94, 68
-    d1, d5, d6 = 83, 61, 100
+    #th_deg = [-40,40,-40,-40,-40,-130]
+    #a2, a3, a4 = 93.5, 94, 68
+    #d1, d5, d6 = 83, 61, 100
 
     # 1) Forward Kinematics
-    T07 = ForwardKinematics(th_deg, a2, a3, a4, d1, d5, d6)
+    #T07 = ForwardKinematics(th_deg, a2, a3, a4, d1, d5, d6)
     #print(T07)
     ###############################################################
+    # 1) Z축으로 –90° 회전 행렬 R_z(-90°)
     Rz = np.array([
         [0, 1, 0],
         [-1, 0, 0],
-        [0, 0, 1]])
+        [0, 0, 1]
+    ])
 
+    # 2) Y축으로 +90° 회전 행렬 R_y(+90°)
     Ry = np.array([
         [0, 0, 1],
         [0, 1, 0],
-        [-1, 0, 0]])
+        [-1, 0, 0]
+    ])
 
-    R =  Ry @ Rz
+    # 3) 합성 회전 R = R_y(+90°) @ R_z(-90°)
+    R = Ry @ Rz
+    # R == [[ 0,  0,  1],
+    #       [-1,  0,  0],
+    #       [ 0, -1,  0]]
 
+
+    print("R=",R)
     # 4) 최종 4×4 균질변환 행렬 T 생성
     T07 = np.eye(4)
     T07[:3, :3] = R
-    T07[:3, 3] = [250, 0, 170]
+    T07[:3, 3] = [300, 0, 40]
     print(T07)
     ###############################################################
 

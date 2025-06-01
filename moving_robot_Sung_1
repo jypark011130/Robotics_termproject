@@ -1,0 +1,281 @@
+import time
+import math
+from motorLLC_Protocol_TP_GPT import motorLLC   # motorLLC 클래스가 정의된 파일명으로 바꿔주세요
+
+mcos = math.cos
+msin = math.sin
+matan2 = math.atan2
+msqrt = math.sqrt
+mpi = math.pi
+
+#이거 바꿔도 되긴 함
+a2, a3, a4 = 93.5, 94, 68
+d1, d5, d6 = 83, 61, 100
+
+def DH2TF(alpha, a, theta, d):
+    T = Matrix([[cos(theta), -sin(theta), 0, a],
+                [sin(theta) * cos(alpha), cos(theta) * cos(alpha), -sin(alpha), -d * sin(alpha)],
+                [sin(theta) * sin(alpha), cos(theta) * sin(alpha), cos(alpha), d * cos(alpha)],
+                [0, 0, 0, 1]])
+    return T
+
+
+def ForwardKinematics(th, a2, a3, a4, d1, d5, d6):
+    th1 = th[0] * mpi / 180;
+    th2 = th[1] * mpi / 180;
+    th3 = th[2] * mpi / 180;
+    th4 = th[3] * mpi / 180;
+    th5 = th[4] * mpi / 180;
+    th6 = th[5] * mpi / 180;
+    th7 = 0
+    T01 = DH2TF(0, 0, th1, d1)
+    T12 = DH2TF(pi / 2, 0, th2 + pi / 2, 0)
+    T23 = DH2TF(0, a2, th3, 0)
+    T34 = DH2TF(0, a3, th4, 0)
+    T45 = DH2TF(pi / 2, a4, th5 + pi / 2, 0)
+    T56 = DH2TF(pi / 2, 0, th6 + pi / 2, d5)
+    T67 = DH2TF(0, 0, 0, d6)
+    T07 = T01 * T12 * T23 * T34 * T45 * T56 * T67
+    return T07
+
+
+def theta_calculator(T07, a2, a3, a4, d1, d5, d6):
+    # 회전부와 위치벡터로 분리
+    R = T07[:3, :3]
+    P = T07[:3, 3]
+
+    # 각 요소 지정
+    r11, r12, r13 = R[0, 0], R[0, 1], R[0, 2]
+    r21, r22, r23 = R[1, 0], R[1, 1], R[1, 2]
+    r31, r32, r33 = R[2, 0], R[2, 1], R[2, 2]
+    px, py, pz = P[0], P[1], P[2]
+
+    print("r13=",r13)
+    print("r23=", r23)
+
+    # 1) θ1 계산을 위한 M, N 정의
+    M = (d5 + d6) * r13 - px
+    N = (d5 + d6) * r23 - py
+
+    # 2) 가능한 θ1 해 두 개
+    th1_1 = math.atan2(N, M)
+    th1_2 = math.atan2(-N, -M)
+
+    # 3) 절대값이 더 작은 θ1을 선택
+    th1 = th1_1 if abs(th1_1) < abs(th1_2) else th1_2
+
+    # 4) 선택된 θ1의 sin, cos 계산
+    s1 = math.sin(th1)
+    c1 = math.cos(th1)
+
+    # 5) s5 = s1 * r13 - c1 * r23 (사진의 K)
+    s5 = s1*r13-c1*r23
+    c5 = math.sqrt(1-s5*s5)
+    print("s5=",s5)
+    # 6) c5 = sqrt(1 - s5^2)
+    th5_1 = math.atan2(s5,c5)
+    th5_2 = math.atan2(s5, -c5)
+
+    th5 = th5_1 if abs(th5_1) < abs(th5_2) else th5_2
+    c5 = math.cos(th5)
+    s5 = math.sin(th5)
+
+    print("c5=",c5)
+    c234 = r33 / math.cos(th5)
+    print("c1*r13+s1*r23=",c1*r13+s1*r23)
+    s234 = -(c1*r13+s1*r23)/math.cos(th5)
+    th234 = math.atan2(s234,c234)
+    print("th234=", th234)
+
+
+    # 9) s234, c234
+    k=c1*px+s1*py
+    D=a4+(d5+d6)*c5
+    u=-k-D*s234
+    w=pz-D*c234 - d1
+    r=math.sqrt(u*u+w*w)
+
+
+    ##############################################
+    c3=(r*r-a2*a2-a3*a3)/(2*a2*a3)
+    print("c3=",c3)
+    c3 = max(-1.0, min(1.0, c3))
+
+    # ── 2) 특이 자세(c3 == ±1) 여부 확인 ────
+    if abs(c3) >= 0.999999:  # 1 또는 -1 을 float 오차까지 허용
+        # 팔꿈치가 완전히 펴지거나 접힌 경우 → |θ5| 가 더 큰 후보 채택
+        th5 = th5_1 if abs(th5_1) > abs(th5_2) else th5_2
+    else:
+        # 일반 경우 → |θ5| 가 더 작은 후보 채택(기존 로직)
+        th5 = th5_1 if abs(th5_1) < abs(th5_2) else th5_2
+
+    # ── 3) 선택된 θ5 로부터 하위 각도들을 *다시* 계산 ──
+    c5 = math.cos(th5)
+    s5 = math.sin(th5)
+    c234 = r33 / math.cos(th5)
+    s234 = -(c1 * r13 + s1 * r23) / math.cos(th5)
+    th234 = math.atan2(s234, c234)
+
+    k=c1*px+s1*py
+    D=a4+(d5+d6)*c5
+    u=-k-D*s234
+    w=pz-D*c234 - d1
+    r=math.sqrt(u*u+w*w)
+
+    c3=(r*r-a2*a2-a3*a3)/(2*a2*a3)
+    print("c3=",c3)
+    c3 = max(-1.0, min(1.0, c3))
+
+
+
+    print("분자=", r*r-(a2*a2+a3*a3))
+    print("2*a2*a3=분모=", 2*a2*a3)
+    print("c3=", c3)
+    th3_1=math.atan2(math.sqrt(1-c3*c3),c3)
+    print('th3_1=',th3_1)
+    th3_2 = math.atan2(-math.sqrt(1 - c3 * c3), c3)
+    print('th3_2=', th3_2)
+
+    abs1 = abs(th3_1)
+    abs2 = abs(th3_2)
+
+    if abs1 < abs2:
+        th3 = th3_1
+    elif abs1 > abs2:
+        th3 = th3_2
+    else:
+        # abs1 == abs2 인 경우엔 양수인 쪽 선택
+        th3 = min(th3_1, th3_2)
+        print('th3 부호가 정확히 정해지지 않았어요! 일단 -로')
+
+    print("th3=", th3)
+
+    s3 = math.sin(th3)
+
+    print("s3=", s3)
+
+
+    R = a2 + a3*c3
+    S = a3*s3
+    s2 = (R*u - S*w)/(R*R+S*S)
+    c2 = (R*w + S*u)/(R*R+S*S)
+    th2 = math.atan2(s2,c2)
+    print('th234=', th234 /math.pi*180)
+    print('th3=', th3/math.pi*180)
+    print('th2=', th2/math.pi*180)
+    th4 = th234 - th2 - th3
+
+
+    # 17) θ6 계산
+    # sinθ6 = (−s1·r12 + c1·r22) / cosθ5
+    s6 = s5 * c234 * r31 - s234 * r32
+    c6 = s234 * r31 + s5 * c234 * r32
+    print("s6=",s6)
+    # cosθ6 = ±√(1−s6²) – 분기 처리 필요
+
+    th6 = math.atan2(s6, c6)
+
+    return th1, th2, th3, th4, th5, th6
+
+
+# ===== 프로파일 파라미터 =====
+TB = 0.3         # [s] 가·감속
+TF = 2.0
+TL = TF - 2*TB   # 1.4
+DT = 0.1       # 10Hz
+PULSES_PER_RAD = 1023 / math.radians(300)
+
+def rad2pulse(theta_rad: float) -> int:
+    # ① 사용-좌표계(−150° ~ +150°) → 기계좌표계(0° ~ 300°)
+    mech_deg = math.degrees(theta_rad) + 150.0   # offset +150°
+
+    # ② 허용 범위 밖이면 잘라냄
+    mech_deg = max(0.0, min(300.0, mech_deg))
+
+    # ③ 0 ~ 300°  →  0 ~ 1023 펄스
+    pulse = int(round(mech_deg * 1023.0 / 300.0))
+
+    return pulse
+
+def s_curve_velocities(theta_prev_deg, theta_next_deg):
+    """
+    포물선-블렌드 S-커브( 0-0.3-1.4-0.3 s )에 맞춰
+    Dynamixel Goal Velocity( pulse/s ) 리스트를 만든다.
+    Δθ가 작아도 1 pulse/s 이상으로 보낸다.
+    """
+    v_list = []
+    for th0, thf in zip(theta_prev_deg, theta_next_deg):
+        delta_rad = abs(math.radians(thf - th0))
+        v_max_rad = delta_rad / (TB + TL)               # v = Δθ / (1.7 s)
+        v_max_pulse = max(1,
+                          min(1023,                     # 프로토콜-1 최대값
+                              int(round(v_max_rad * PULSES_PER_RAD))))
+        v_list.append(v_max_pulse)
+    return v_list
+
+def s_curve_theta(t: float, th0: float, thf: float) -> float:
+    """t∈[0,TF] ⇒ θ(rad)  (포물선-선-포물선)"""
+    dθ = thf - th0
+    a = dθ / (TB * (TB + TL))     # Δθ/(0.3·1.7)
+    v = a * TB                    # 최고 속도
+
+    if t <= 0:
+        return th0
+
+    elif t < TB:
+        return th0 + 0.5 * a * t * t
+
+    elif t < TF - TB:
+        return th0 + 0.5 * a * TB * TB + v * (t - TB)
+
+    elif t < TF:
+        dt = TF - t
+        return thf - 0.5 * a * dt * dt
+
+    else:
+        return thf
+
+# ===== 직전·목표 각도 (deg) 예시 =====
+theta_prev_deg = [  0,   0,  0,  0,  0,  0]
+theta_next_deg = [ -0. ,  -63.72 ,-92.71,  66.44,  -0. ,  -90. ]
+
+theta_prev_rad = [math.radians(d) for d in theta_prev_deg]
+theta_next_rad = [math.radians(d) for d in theta_next_deg]
+
+
+if __name__ == "__main__":
+    # 1) 객체 생성
+    motor = motorLLC()
+
+    # 2) 포트 오픈 & Baudrate 설정
+    motor.open()
+
+    # 3) 토크(On) 활성화
+    motor.torque_enable()
+    motor.ids = motor.ids[:6]
+    t_next = time.perf_counter()
+
+    for step in range(int(TF / DT) + 1):  # 0 … 2000
+        t = step * DT  # 상대 시각
+
+        # ① 각 관절 목표각(rad) 계산
+        th_rad = [s_curve_theta(t, th0, thf)
+                  for th0, thf in zip(theta_prev_rad, theta_next_rad)]
+        # ② pulse 변환
+        pos_pulse = [rad2pulse(r) for r in th_rad]
+
+        # ③ 동시 송신 (sync write)
+        #motor.sync_write_goal_position(pos_pulse)
+
+        # ④ 다음 주기까지 대기
+        t_next += DT
+        sleep_time = t_next - time.perf_counter()
+        if sleep_time > 0:
+            time.sleep(sleep_time)  # OS scheduler 지연 포함
+        else:
+            # 지연‧오버런 발생 시 경고만 출력(필요하면 로깅)
+            print(f"⚠️ overrun {sleep_time * 1e3:+.2f} ms")
+
+        # ===== 종료 / 모니터링 =====
+    print("최종 위치:", motor.readPos())
+    # motor.close()
